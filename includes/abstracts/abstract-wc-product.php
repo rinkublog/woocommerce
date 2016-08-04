@@ -1,207 +1,380 @@
 <?php
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+include_once( 'abstract-wc-legacy-product.php' );
+
 /**
  * Abstract Product Class
  *
  * The WooCommerce product class handles individual product data.
  *
- * @class       WC_Product
- * @var         WP_Post
- * @version     2.1.0
- * @package     WooCommerce/Abstracts
- * @category    Abstract Class
- * @author      WooThemes
- *
- * @property    string $width Product width
- * @property    string $length Product length
- * @property    string $height Product height
- * @property    string $weight Product weight
- * @property    string $price Product price
- * @property    string $regular_price Product regular price
- * @property    string $sale_price Product sale price
- * @property    string $product_image_gallery String of image IDs in the gallery
- * @property    string $sku Product SKU
- * @property    string $stock Stock amount
- * @property    string $downloadable Shows/define if the product is downloadable
- * @property    string $virtual Shows/define if the product is virtual
- * @property    string $sold_individually Allow one item to be bought in a single order
- * @property    string $tax_status Tax status
- * @property    string $tax_class Tax class
- * @property    string $manage_stock Shows/define if can manage the product stock
- * @property    string $stock_status Stock status
- * @property    string $backorders Whether or not backorders are allowed
- * @property    string $featured Featured product
- * @property    string $visibility Product visibility
- * @property    string $variation_id Variation ID when dealing with variations
+ * @class    WC_Product
+ * @version  2.7.0
+ * @package  WooCommerce/Abstracts
+ * @category Abstract Class
+ * @author   WooThemes
  */
-class WC_Product {
+class WC_Product extends WC_Abstract_Legacy_Product {
 
 	/**
-	 * The product (post) ID.
+	 * Product data array, with defaults. This is the core product data exposed
+	 * in APIs since 2.7.0.
 	 *
-	 * @var int
+	 * @since 2.7.0
+	 * @var array
 	 */
-	public $id = 0;
+	protected $_data = array(
+		'id'                => 0,
+		'type'              => null,
+		'name'              => '',
+		'status'            => '',
+		'slug'              => '',
+		'date_created'      => '',
+		'date_modified'     => '',
+		'description'       => '',
+		'short_description' => '',
+		'author_id'         => 0,
+		'parent_id'         => 0,
+		'menu_order'        => 0,
+	);
 
 	/**
-	 * $post Stores post data.
+	 * Data stored in meta keys, but not considered "meta" for a product.
 	 *
-	 * @var $post WP_Post
+	 * @since 2.7.0
+	 * @var array
 	 */
-	public $post = null;
+	protected $_internal_meta_keys = array(
+		'',
+	);
 
 	/**
-	 * The product's type (simple, variable etc).
+	 * Internal meta type used to store product data.
 	 *
 	 * @var string
 	 */
-	public $product_type = null;
+	protected $_meta_type = 'post';
 
 	/**
-	 * Product shipping class.
+	 * Stores meta in cache for future reads.
+	 * A group must be set to to enable caching.
 	 *
 	 * @var string
 	 */
-	protected $shipping_class    = '';
+	protected $_cache_group = 'product';
 
 	/**
-	 * ID of the shipping class this product has.
+	 * Type of post.
 	 *
-	 * @var int
+	 * @since 2.7.0
+	 * @var string
 	 */
-	protected $shipping_class_id = 0;
-
-	/** @public string The product's total stock, including that of its children. */
-	public $total_stock;
+	protected $post_type = 'product';
 
 	/**
 	 * Supported features such as 'ajax_add_to_cart'.
+	 *
 	 * @var array
 	 */
 	protected $supports = array();
 
 	/**
-	 * Constructor gets the post object and sets the ID for the loaded product.
+	 * Get the product if ID is passed, otherwise the product is new and empty.
+	 * This class should NOT be instantiated, but the wc_get_product() function
+	 * should be used. It is possible, but the wc_get_product() is preferred.
 	 *
-	 * @param int|WC_Product|object $product Product ID, post object, or product object
+	 * @param int|WC_Product|object $product Product to init.
 	 */
-	public function __construct( $product ) {
-		if ( is_numeric( $product ) ) {
-			$this->id   = absint( $product );
-			$this->post = get_post( $this->id );
-		} elseif ( $product instanceof WC_Product ) {
-			$this->id   = absint( $product->id );
-			$this->post = $product->post;
-		} elseif ( isset( $product->ID ) ) {
-			$this->id   = absint( $product->ID );
-			$this->post = $product;
+	public function __construct( $product = 0 ) {
+		if ( is_numeric( $product ) && $product > 0 ) {
+			$this->read( $product );
+		} elseif ( $product instanceof self ) {
+			$this->read( absint( $product->get_id() ) );
+		} elseif ( ! empty( $product->ID ) ) {
+			$this->read( absint( $product->ID ) );
+		}
+	}
+
+	/*
+	|--------------------------------------------------------------------------
+	| CRUD methods
+	|--------------------------------------------------------------------------
+	|
+	| Methods which create, read, update and delete products from the database.
+	| Written in abstract fashion so that the way products are stored can be
+	| changed more easily in the future.
+	|
+	| A save method is included for convenience (chooses update or create based
+	| on if the product exists yet).
+	*/
+
+	/**
+	 * Insert data into the database.
+	 *
+	 * @since 2.7.0
+	 */
+	public function create() {
+		$this->set_date_created( current_time( 'timestamp' ) );
+
+		$data = array(
+			'post_date'     => date( 'Y-m-d H:i:s', $this->get_date_created() ),
+			'post_date_gmt' => get_gmt_from_date( date( 'Y-m-d H:i:s', $this->get_date_created() ) ),
+			'post_type'     => $this->post_type,
+			'post_status'   => $this->get_status() ? $this->get_status() : 'draft',
+			'ping_status'   => 'closed',
+			'post_author'   => $this->get_author_id() ? $this->get_author_id() : get_current_user_id(),
+			'post_title'    => $this->get_name(),
+			'post_parent'   => $this->get_parent_id(),
+			'menu_order'    => $this->get_menu_order(),
+		);
+
+		if ( ! empty( $this->get_slug() ) ) {
+			$data['post_name'] = sanitize_title( $this->get_slug() );
+		}
+
+		$product_id = wp_insert_post( apply_filters( 'woocommerce_new_product_data', $data ), true );
+
+		if ( $product_id ) {
+			$this->set_id( $product_id );
+
+			// Set taxonomies.
+			wp_set_object_terms( $product_id, $this->get_type(), 'product_type' );
+
+			// Set meta data.
+			// $this->update_post_meta( '_customer_user', $this->get_customer_id() );
+			$this->save_meta_data();
 		}
 	}
 
 	/**
-	 * __isset function.
+	 * Read from the database.
 	 *
-	 * @param mixed $key
-	 * @return bool
+	 * @since 2.7.0
+	 * @param int $id ID of object to read.
 	 */
-	public function __isset( $key ) {
-		return metadata_exists( 'post', $this->id, '_' . $key );
-	}
-
-	/**
-	 * __get function.
-	 *
-	 * @param string $key
-	 * @return mixed
-	 */
-	public function __get( $key ) {
-		$value = get_post_meta( $this->id, '_' . $key, true );
-
-		// Get values or default if not set
-		if ( in_array( $key, array( 'downloadable', 'virtual', 'backorders', 'manage_stock', 'featured', 'sold_individually' ) ) ) {
-			$value = $value ? $value : 'no';
-
-		} elseif ( in_array( $key, array( 'product_attributes', 'crosssell_ids', 'upsell_ids' ) ) ) {
-			$value = $value ? $value : array();
-
-		} elseif ( 'visibility' === $key ) {
-			$value = $value ? $value : 'hidden';
-
-		} elseif ( 'stock' === $key ) {
-			$value = $value ? $value : 0;
-
-		} elseif ( 'stock_status' === $key ) {
-			$value = $value ? $value : 'instock';
-
-		} elseif ( 'tax_status' === $key ) {
-			$value = $value ? $value : 'taxable';
-
+	public function read( $id ) {
+		if ( empty( $id ) || ! ( $post_object = get_post( $id ) ) ) {
+			return;
 		}
 
-		if ( false !== $value ) {
-			$this->$key = $value;
+		// Set ID.
+		$this->set_id( $post_object->ID );
+		$product_id = $this->get_id();
+
+		// Map standard post data.
+		$this->set_name( $post_object->post_title );
+		$this->set_status( $post_object->post_status );
+		$this->set_slug( $post_object->post_name );
+		$this->set_date_created( $post_object->post_date );
+		$this->set_date_modified( $post_object->post_modified );
+		$this->set_description( $post_object->post_content );
+		$this->set_short_description( $post_object->post_excerpt );
+		$this->set_author_id( $post_object->post_author );
+		$this->set_parent_id( $post_object->post_parent );
+		$this->set_menu_order( $post_object->menu_order );
+
+		// Load meta data.
+		$this->read_meta_data();
+
+		// Set the legacy public variables for backwards compatibility.
+		$this->id           = $this->get_id();
+		$this->post         = $post_object;
+		$this->product_type = $this->get_type();
+	}
+
+	/**
+	 * Update data in the database.
+	 *
+	 * @since 2.7.0
+	 */
+	public function update() {
+		global $wpdb;
+
+		$product_id = $this->get_id();
+
+		$wpdb->update(
+			$wpdb->posts,
+			array(
+				'post_date'     => date( 'Y-m-d H:i:s', $this->get_date_created() ),
+				'post_date_gmt' => get_gmt_from_date( date( 'Y-m-d H:i:s', $this->get_date_created() ) ),
+				'post_status'   => $this->get_status(),
+				'post_parent'   => $this->get_parent_id(),
+			),
+			array(
+				'ID' => $product_id
+			)
+		);
+
+		// Update meta data.
+		// $this->update_post_meta( '_customer_user', $this->get_customer_id() );
+		$this->save_meta_data();
+	}
+
+	/**
+	 * Delete data from the database.
+	 *
+	 * @since 2.7.0
+	 */
+	public function delete() {
+		wp_delete_post( $this->get_id() );
+	}
+
+	/**
+	 * Save data to the database.
+	 *
+	 * @since 2.7.0
+	 * @return int Product ID.
+	 */
+	public function save() {
+		if ( ! $this->get_id() ) {
+			$this->create();
+		} else {
+			$this->update();
 		}
 
-		return $value;
+		clean_post_cache( $this->get_id() );
+		wc_delete_product_transients( $this->get_id() );
+
+		return $this->get_id();
 	}
 
-	/**
-	 * Get the product's post data.
-	 *
-	 * @return object
-	 */
-	public function get_post_data() {
-		return $this->post;
-	}
+	/*
+	|--------------------------------------------------------------------------
+	| Getters
+	|--------------------------------------------------------------------------
+	|
+	| Methods for getting data from the product object.
+	*/
 
 	/**
-	 * Check if a product supports a given feature.
+	 * Get product ID.
 	 *
-	 * Product classes should override this to declare support (or lack of support) for a feature.
-	 *
-	 * @param string $feature string The name of a feature to test support for.
-	 * @return bool True if the product supports the feature, false otherwise.
 	 * @since 2.5.0
-	 */
-	public function supports( $feature ) {
-		return apply_filters( 'woocommerce_product_supports', in_array( $feature, $this->supports ) ? true : false, $feature, $this );
-	}
-
-	/**
-	 * Return the product ID
-	 *
-	 * @since 2.5.0
-	 * @return int product (post) ID
+	 * @return int
 	 */
 	public function get_id() {
-
-		return $this->id;
+		return $this->_data['id'];
 	}
 
 	/**
-	 * Returns the gallery attachment ids.
-	 *
-	 * @return array
-	 */
-	public function get_gallery_attachment_ids() {
-		return apply_filters( 'woocommerce_product_gallery_attachment_ids', array_filter( array_filter( (array) explode( ',', $this->product_image_gallery ) ), 'wp_attachment_is_image' ), $this );
-	}
-
-	/**
-	 * Wrapper for get_permalink.
+	 * Return the product type.
 	 *
 	 * @return string
 	 */
-	public function get_permalink() {
-		return get_permalink( $this->id );
+	public function get_type() {
+		return (string) $this->_data['type'];
 	}
 
 	/**
-	 * Get SKU (Stock-keeping unit) - product unique ID.
+	 * Get the product name.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_name() {
+		return apply_filters( 'woocommerce_product_get_name', $this->_data['name'], $this );
+	}
+
+	/**
+	 * Return the product slug.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_slug() {
+		return $this->_data['slug'];
+	}
+
+	/**
+	 * Get the product status.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_status() {
+		return $this->_data['status'];
+	}
+
+	/**
+	 * Return date created.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_date_created() {
+		return $this->_data['date_created'];
+	}
+
+	/**
+	 * Return date modified.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_date_modified() {
+		return $this->_data['date_modified'];
+	}
+
+	/**
+	 * Return description.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_description() {
+		return $this->_data['description'];
+	}
+
+	/**
+	 * Return short description.
+	 *
+	 * @since 2.7.0
+	 * @return string
+	 */
+	public function get_short_description() {
+		return $this->_data['short_description'];
+	}
+
+	/**
+	 * Return product author ID.
+	 *
+	 * @since 2.7.0
+	 * @return int
+	 */
+	public function get_author_id() {
+		return $this->_data['author_id'];
+	}
+
+	/**
+	 * Return product parent ID.
+	 *
+	 * @since 2.7.0
+	 * @return int
+	 */
+	public function get_parent_id() {
+		return $this->_data['parent_id'];
+	}
+
+	/**
+	 * Return product menu order.
+	 *
+	 * @since 2.7.0
+	 * @return int
+	 */
+	public function get_menu_order() {
+		return $this->_data['menu_order'];
+	}
+
+	/**
+	 * Get SKU (Stock-keeping unit).
+	 * Product unique ID.
 	 *
 	 * @return string
 	 */
 	public function get_sku() {
-		return apply_filters( 'woocommerce_get_sku', $this->sku, $this );
+		return apply_filters( 'woocommerce_get_sku', get_post_meta( $this->get_id(), '_sku', true ), $this );
 	}
 
 	/**
@@ -237,259 +410,12 @@ class WC_Product {
 	}
 
 	/**
-	 * Check if the stock status needs changing.
-	 */
-	public function check_stock_status() {
-		if ( ! $this->backorders_allowed() && $this->get_total_stock() <= get_option( 'woocommerce_notify_no_stock_amount' ) ) {
-			if ( $this->stock_status !== 'outofstock' ) {
-				$this->set_stock_status( 'outofstock' );
-			}
-		} elseif ( $this->backorders_allowed() || $this->get_total_stock() > get_option( 'woocommerce_notify_no_stock_amount' ) ) {
-			if ( $this->stock_status !== 'instock' ) {
-				$this->set_stock_status( 'instock' );
-			}
-		}
-	}
-
-	/**
-	 * Set stock level of the product.
-	 *
-	 * Uses queries rather than update_post_meta so we can do this in one query (to avoid stock issues).
-	 * We cannot rely on the original loaded value in case another order was made since then.
-	 *
-	 * @param int $amount (default: null)
-	 * @param string $mode can be set, add, or subtract
-	 * @return int new stock level
-	 */
-	public function set_stock( $amount = null, $mode = 'set' ) {
-		global $wpdb;
-
-		if ( ! is_null( $amount ) && $this->managing_stock() ) {
-
-			// Ensure key exists
-			add_post_meta( $this->id, '_stock', 0, true );
-
-			// Update stock in DB directly
-			switch ( $mode ) {
-				case 'add' :
-					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = meta_value + %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
-				break;
-				case 'subtract' :
-					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = meta_value - %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
-				break;
-				default :
-					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
-				break;
-			}
-
-			// Clear caches
-			wp_cache_delete( $this->id, 'post_meta' );
-			delete_transient( 'wc_low_stock_count' );
-			delete_transient( 'wc_outofstock_count' );
-			unset( $this->stock );
-
-			// Stock status
-			$this->check_stock_status();
-
-			// Trigger action
-			do_action( 'woocommerce_product_set_stock', $this );
-		}
-
-		return $this->get_stock_quantity();
-	}
-
-	/**
-	 * Reduce stock level of the product.
-	 *
-	 * @param int $amount Amount to reduce by. Default: 1
-	 * @return int new stock level
-	 */
-	public function reduce_stock( $amount = 1 ) {
-		return $this->set_stock( $amount, 'subtract' );
-	}
-
-	/**
-	 * Increase stock level of the product.
-	 *
-	 * @param int $amount Amount to increase by. Default 1.
-	 * @return int new stock level
-	 */
-	public function increase_stock( $amount = 1 ) {
-		return $this->set_stock( $amount, 'add' );
-	}
-
-	/**
-	 * Set stock status of the product.
-	 *
-	 * @param string $status
-	 */
-	public function set_stock_status( $status ) {
-
-		$status = ( 'outofstock' === $status ) ? 'outofstock' : 'instock';
-
-		// Sanity check
-		if ( $this->managing_stock() ) {
-			if ( ! $this->backorders_allowed() && $this->get_stock_quantity() <= get_option( 'woocommerce_notify_no_stock_amount' ) ) {
-				$status = 'outofstock';
-			}
-		}
-
-		if ( update_post_meta( $this->id, '_stock_status', $status ) ) {
-			$this->stock_status = $status;
-			do_action( 'woocommerce_product_set_stock_status', $this->id, $status );
-		}
-	}
-
-	/**
-	 * Return the product type.
-	 *
-	 * @return string
-	 */
-	public function get_type() {
-		return is_null( $this->product_type ) ? '' : $this->product_type;
-	}
-
-	/**
-	 * Checks the product type.
-	 *
-	 * Backwards compat with downloadable/virtual.
-	 *
-	 * @param string $type Array or string of types
-	 * @return bool
-	 */
-	public function is_type( $type ) {
-		return ( $this->product_type == $type || ( is_array( $type ) && in_array( $this->product_type, $type ) ) ) ? true : false;
-	}
-
-	/**
-	 * Checks if a product is downloadable.
-	 *
-	 * @return bool
-	 */
-	public function is_downloadable() {
-		return $this->downloadable == 'yes' ? true : false;
-	}
-
-	/**
-	 * Check if downloadable product has a file attached.
-	 *
-	 * @since 1.6.2
-	 *
-	 * @param string $download_id file identifier
-	 * @return bool Whether downloadable product has a file attached.
-	 */
-	public function has_file( $download_id = '' ) {
-		return ( $this->is_downloadable() && $this->get_file( $download_id ) ) ? true : false;
-	}
-
-	/**
-	 * Gets an array of downloadable files for this product.
-	 *
-	 * @since 2.1.0
+	 * Returns the children.
 	 *
 	 * @return array
 	 */
-	public function get_files() {
-
-		$downloadable_files = array_filter( isset( $this->downloadable_files ) ? (array) maybe_unserialize( $this->downloadable_files ) : array() );
-
-		if ( ! empty( $downloadable_files ) ) {
-
-			foreach ( $downloadable_files as $key => $file ) {
-
-				if ( ! is_array( $file ) ) {
-					$downloadable_files[ $key ] = array(
-						'file' => $file,
-						'name' => ''
-					);
-				}
-
-				// Set default name
-				if ( empty( $file['name'] ) ) {
-					$downloadable_files[ $key ]['name'] = wc_get_filename_from_url( $file['file'] );
-				}
-
-				// Filter URL
-				$downloadable_files[ $key ]['file'] = apply_filters( 'woocommerce_file_download_path', $downloadable_files[ $key ]['file'], $this, $key );
-			}
-		}
-
-		return apply_filters( 'woocommerce_product_files', $downloadable_files, $this );
-	}
-
-	/**
-	 * Get a file by $download_id.
-	 *
-	 * @param string $download_id file identifier
-	 * @return array|false if not found
-	 */
-	public function get_file( $download_id = '' ) {
-
-		$files = $this->get_files();
-
-		if ( '' === $download_id ) {
-			$file = sizeof( $files ) ? current( $files ) : false;
-		} elseif ( isset( $files[ $download_id ] ) ) {
-			$file = $files[ $download_id ];
-		} else {
-			$file = false;
-		}
-
-		// allow overriding based on the particular file being requested
-		return apply_filters( 'woocommerce_product_file', $file, $this, $download_id );
-	}
-
-	/**
-	 * Get file download path identified by $download_id.
-	 *
-	 * @param string $download_id file identifier
-	 * @return string
-	 */
-	public function get_file_download_path( $download_id ) {
-		$files = $this->get_files();
-
-		if ( isset( $files[ $download_id ] ) ) {
-			$file_path = $files[ $download_id ]['file'];
-		} else {
-			$file_path = '';
-		}
-
-		// allow overriding based on the particular file being requested
-		return apply_filters( 'woocommerce_product_file_download_path', $file_path, $this, $download_id );
-	}
-
-	/**
-	 * Checks if a product is virtual (has no shipping).
-	 *
-	 * @return bool
-	 */
-	public function is_virtual() {
-		return apply_filters( 'woocommerce_is_virtual', $this->virtual == 'yes' ? true : false, $this );
-	}
-
-	/**
-	 * Checks if a product needs shipping.
-	 *
-	 * @return bool
-	 */
-	public function needs_shipping() {
-		return apply_filters( 'woocommerce_product_needs_shipping', $this->is_virtual() ? false : true, $this );
-	}
-
-	/**
-	 * Check if a product is sold individually (no quantities).
-	 *
-	 * @return bool
-	 */
-	public function is_sold_individually() {
-
-		$return = false;
-
-		if ( 'yes' == $this->sold_individually ) {
-			$return = true;
-		}
-
-		return apply_filters( 'woocommerce_is_sold_individually', $return, $this );
+	public function get_children() {
+		return array();
 	}
 
 	/**
@@ -500,153 +426,6 @@ class WC_Product {
 	 */
 	public function get_child( $child_id ) {
 		return wc_get_product( $child_id );
-	}
-
-	/**
-	 * Returns the children.
-	 *
-	 * @return array
-	 */
-	public function get_children() {
-		return array();
-	}
-
-	/**
-	 * Returns whether or not the product has any child product.
-	 *
-	 * @return bool
-	 */
-	public function has_child() {
-		return false;
-	}
-
-	/**
-	 * Returns whether or not the product post exists.
-	 *
-	 * @return bool
-	 */
-	public function exists() {
-		return empty( $this->post ) ? false : true;
-	}
-
-	/**
-	 * Returns whether or not the product is taxable.
-	 *
-	 * @return bool
-	 */
-	public function is_taxable() {
-		$taxable = $this->get_tax_status() === 'taxable' && wc_tax_enabled() ? true : false;
-		return apply_filters( 'woocommerce_product_is_taxable', $taxable, $this );
-	}
-
-	/**
-	 * Returns whether or not the product shipping is taxable.
-	 *
-	 * @return bool
-	 */
-	public function is_shipping_taxable() {
-		return $this->get_tax_status() === 'taxable' || $this->get_tax_status() === 'shipping' ? true : false;
-	}
-
-	/**
-	 * Get the title of the post.
-	 *
-	 * @return string
-	 */
-	public function get_title() {
-		return apply_filters( 'woocommerce_product_title', $this->post ? $this->post->post_title : '', $this );
-	}
-
-	/**
-	 * Get the parent of the post.
-	 *
-	 * @return int
-	 */
-	public function get_parent() {
-		return apply_filters( 'woocommerce_product_parent', absint( $this->post->post_parent ), $this );
-	}
-
-	/**
-	 * Get the add to url used mainly in loops.
-	 *
-	 * @return string
-	 */
-	public function add_to_cart_url() {
-		return apply_filters( 'woocommerce_product_add_to_cart_url', get_permalink( $this->id ), $this );
-	}
-
-	/**
-	 * Get the add to cart button text for the single page.
-	 *
-	 * @return string
-	 */
-	public function single_add_to_cart_text() {
-		return apply_filters( 'woocommerce_product_single_add_to_cart_text', __( 'Add to cart', 'woocommerce' ), $this );
-	}
-
-	/**
-	 * Get the add to cart button text.
-	 *
-	 * @return string
-	 */
-	public function add_to_cart_text() {
-		return apply_filters( 'woocommerce_product_add_to_cart_text', __( 'Read more', 'woocommerce' ), $this );
-	}
-
-	/**
-	 * Returns whether or not the product is stock managed.
-	 *
-	 * @return bool
-	 */
-	public function managing_stock() {
-		return ( ! isset( $this->manage_stock ) || $this->manage_stock == 'no' || get_option( 'woocommerce_manage_stock' ) !== 'yes' ) ? false : true;
-	}
-
-	/**
-	 * Returns whether or not the product is in stock.
-	 *
-	 * @return bool
-	 */
-	public function is_in_stock() {
-		return apply_filters( 'woocommerce_product_is_in_stock', $this->stock_status === 'instock', $this );
-	}
-
-	/**
-	 * Returns whether or not the product can be backordered.
-	 *
-	 * @return bool
-	 */
-	public function backorders_allowed() {
-		return apply_filters( 'woocommerce_product_backorders_allowed', $this->backorders === 'yes' || $this->backorders === 'notify' ? true : false, $this->id, $this );
-	}
-
-	/**
-	 * Returns whether or not the product needs to notify the customer on backorder.
-	 *
-	 * @return bool
-	 */
-	public function backorders_require_notification() {
-		return apply_filters( 'woocommerce_product_backorders_require_notification', $this->managing_stock() && $this->backorders === 'notify' ? true : false, $this );
-	}
-
-	/**
-	 * Check if a product is on backorder.
-	 *
-	 * @param int $qty_in_cart (default: 0)
-	 * @return bool
-	 */
-	public function is_on_backorder( $qty_in_cart = 0 ) {
-		return $this->managing_stock() && $this->backorders_allowed() && ( $this->get_total_stock() - $qty_in_cart ) < 0 ? true : false;
-	}
-
-	/**
-	 * Returns whether or not the product has enough stock for the order.
-	 *
-	 * @param mixed $quantity
-	 * @return bool
-	 */
-	public function has_enough_stock( $quantity ) {
-		return ! $this->managing_stock() || $this->backorders_allowed() || $this->get_stock_quantity() >= $quantity ? true : false;
 	}
 
 	/**
@@ -723,100 +502,6 @@ class WC_Product {
 			$class = 'in-stock';
 		}
 		return apply_filters( 'woocommerce_get_availability_class', $class, $this );
-	}
-
-	/**
-	 * Returns whether or not the product is featured.
-	 *
-	 * @return bool
-	 */
-	public function is_featured() {
-		return $this->featured === 'yes' ? true : false;
-	}
-
-	/**
-	 * Returns whether or not the product is visible in the catalog.
-	 *
-	 * @return bool
-	 */
-	public function is_visible() {
-		if ( ! $this->post ) {
-			$visible = false;
-
-		// Published/private
-		} elseif ( $this->post->post_status !== 'publish' && ! current_user_can( 'edit_post', $this->id ) ) {
-			$visible = false;
-
-		// Out of stock visibility
-		} elseif ( 'yes' === get_option( 'woocommerce_hide_out_of_stock_items' ) && ! $this->is_in_stock() ) {
-			$visible = false;
-
-		// visibility setting
-		} elseif ( 'hidden' === $this->visibility ) {
-			$visible = false;
-		} elseif ( 'visible' === $this->visibility ) {
-			$visible = true;
-
-		// Visibility in loop
-		} elseif ( is_search() ) {
-			$visible = 'search' === $this->visibility;
-		} else {
-			$visible = 'catalog' === $this->visibility;
-		}
-
-		return apply_filters( 'woocommerce_product_is_visible', $visible, $this->id );
-	}
-
-	/**
-	 * Returns whether or not the product is on sale.
-	 *
-	 * @return bool
-	 */
-	public function is_on_sale() {
-		return apply_filters( 'woocommerce_product_is_on_sale', ( $this->get_sale_price() !== $this->get_regular_price() && $this->get_sale_price() === $this->get_price() ), $this );
-	}
-
-	/**
-	 * Returns false if the product cannot be bought.
-	 *
-	 * @return bool
-	 */
-	public function is_purchasable() {
-
-		$purchasable = true;
-
-		// Products must exist of course
-		if ( ! $this->exists() ) {
-			$purchasable = false;
-
-		// Other products types need a price to be set
-		} elseif ( $this->get_price() === '' ) {
-			$purchasable = false;
-
-		// Check the product is published
-		} elseif ( $this->post->post_status !== 'publish' && ! current_user_can( 'edit_post', $this->id ) ) {
-			$purchasable = false;
-		}
-
-		return apply_filters( 'woocommerce_is_purchasable', $purchasable, $this );
-	}
-
-	/**
-	 * Set a products price dynamically.
-	 *
-	 * @param float $price Price to set.
-	 */
-	public function set_price( $price ) {
-		$this->price = $price;
-	}
-
-	/**
-	 * Adjust a products price dynamically.
-	 *
-	 * @param mixed $price
-	 */
-	public function adjust_price( $price ) {
-		$this->price = $this->price + $price;
 	}
 
 	/**
@@ -1111,60 +796,6 @@ class WC_Product {
 	}
 
 	/**
-	 * Sync product rating. Can be called statically.
-	 * @param  int $post_id
-	 */
-	public static function sync_average_rating( $post_id ) {
-		if ( ! metadata_exists( 'post', $post_id, '_wc_rating_count' ) ) {
-			self::sync_rating_count( $post_id );
-		}
-
-		$count = array_sum( (array) get_post_meta( $post_id, '_wc_rating_count', true ) );
-
-		if ( $count ) {
-			global $wpdb;
-
-			$ratings = $wpdb->get_var( $wpdb->prepare("
-				SELECT SUM(meta_value) FROM $wpdb->commentmeta
-				LEFT JOIN $wpdb->comments ON $wpdb->commentmeta.comment_id = $wpdb->comments.comment_ID
-				WHERE meta_key = 'rating'
-				AND comment_post_ID = %d
-				AND comment_approved = '1'
-				AND meta_value > 0
-			", $post_id ) );
-			$average = number_format( $ratings / $count, 2, '.', '' );
-		} else {
-			$average = 0;
-		}
-		update_post_meta( $post_id, '_wc_average_rating', $average );
-	}
-
-	/**
-	 * Sync product rating count. Can be called statically.
-	 * @param  int $post_id
-	 */
-	public static function sync_rating_count( $post_id ) {
-		global $wpdb;
-
-		$counts     = array();
-		$raw_counts = $wpdb->get_results( $wpdb->prepare( "
-			SELECT meta_value, COUNT( * ) as meta_value_count FROM $wpdb->commentmeta
-			LEFT JOIN $wpdb->comments ON $wpdb->commentmeta.comment_id = $wpdb->comments.comment_ID
-			WHERE meta_key = 'rating'
-			AND comment_post_ID = %d
-			AND comment_approved = '1'
-			AND meta_value > 0
-			GROUP BY meta_value
-		", $post_id ) );
-
-		foreach ( $raw_counts as $count ) {
-			$counts[ $count->meta_value ] = $count->meta_value_count;
-		}
-
-		update_post_meta( $post_id, '_wc_rating_count', $counts );
-	}
-
-	/**
 	 * Returns the product rating in html format.
 	 *
 	 * @param string $rating (default: '')
@@ -1404,45 +1035,8 @@ class WC_Product {
 	}
 
 	/**
-	 * Returns whether or not the product has any attributes set.
-	 *
-	 * @return boolean
-	 */
-	public function has_attributes() {
-
-		if ( sizeof( $this->get_attributes() ) > 0 ) {
-
-			foreach ( $this->get_attributes() as $attribute ) {
-
-				if ( isset( $attribute['is_visible'] ) && $attribute['is_visible'] ) {
-					return true;
-				}
-			}
-		}
-
-		return false;
-	}
-
-	/**
-	 * Returns whether or not we are showing dimensions on the product page.
-	 *
-	 * @return bool
-	 */
-	public function enable_dimensions_display() {
-		return apply_filters( 'wc_product_enable_dimensions_display', true );
-	}
-
-	/**
-	 * Returns whether or not the product has dimensions set.
-	 *
-	 * @return bool
-	 */
-	public function has_dimensions() {
-		return $this->get_dimensions() ? true : false;
-	}
-
-	/**
 	 * Returns the product length.
+	 *
 	 * @return string
 	 */
 	public function get_length() {
@@ -1451,6 +1045,7 @@ class WC_Product {
 
 	/**
 	 * Returns the product width.
+	 *
 	 * @return string
 	 */
 	public function get_width() {
@@ -1459,6 +1054,7 @@ class WC_Product {
 
 	/**
 	 * Returns the product height.
+	 *
 	 * @return string
 	 */
 	public function get_height() {
@@ -1467,6 +1063,7 @@ class WC_Product {
 
 	/**
 	 * Returns the product's weight.
+	 *
 	 * @todo   refactor filters in this class to naming woocommerce_product_METHOD
 	 * @return string
 	 */
@@ -1475,12 +1072,88 @@ class WC_Product {
 	}
 
 	/**
-	 * Returns whether or not the product has weight set.
+	 * Returns the gallery attachment ids.
 	 *
-	 * @return bool
+	 * @return array
 	 */
-	public function has_weight() {
-		return $this->get_weight() ? true : false;
+	public function get_gallery_attachment_ids() {
+		return apply_filters( 'woocommerce_product_gallery_attachment_ids', array_filter( array_filter( (array) explode( ',', $this->product_image_gallery ) ), 'wp_attachment_is_image' ), $this );
+	}
+
+	/**
+	 * Gets an array of downloadable files for this product.
+	 *
+	 * @since 2.1.0
+	 *
+	 * @return array
+	 */
+	public function get_files() {
+
+		$downloadable_files = array_filter( isset( $this->downloadable_files ) ? (array) maybe_unserialize( $this->downloadable_files ) : array() );
+
+		if ( ! empty( $downloadable_files ) ) {
+
+			foreach ( $downloadable_files as $key => $file ) {
+
+				if ( ! is_array( $file ) ) {
+					$downloadable_files[ $key ] = array(
+						'file' => $file,
+						'name' => ''
+					);
+				}
+
+				// Set default name
+				if ( empty( $file['name'] ) ) {
+					$downloadable_files[ $key ]['name'] = wc_get_filename_from_url( $file['file'] );
+				}
+
+				// Filter URL
+				$downloadable_files[ $key ]['file'] = apply_filters( 'woocommerce_file_download_path', $downloadable_files[ $key ]['file'], $this, $key );
+			}
+		}
+
+		return apply_filters( 'woocommerce_product_files', $downloadable_files, $this );
+	}
+
+	/**
+	 * Get a file by $download_id.
+	 *
+	 * @param string $download_id file identifier
+	 * @return array|false if not found
+	 */
+	public function get_file( $download_id = '' ) {
+
+		$files = $this->get_files();
+
+		if ( '' === $download_id ) {
+			$file = sizeof( $files ) ? current( $files ) : false;
+		} elseif ( isset( $files[ $download_id ] ) ) {
+			$file = $files[ $download_id ];
+		} else {
+			$file = false;
+		}
+
+		// allow overriding based on the particular file being requested
+		return apply_filters( 'woocommerce_product_file', $file, $this, $download_id );
+	}
+
+	/**
+	 * Get file download path identified by $download_id.
+	 *
+	 * @param string $download_id file identifier
+	 * @return string
+	 */
+	public function get_file_download_path( $download_id ) {
+		$files = $this->get_files();
+
+		if ( isset( $files[ $download_id ] ) ) {
+			$file_path = $files[ $download_id ]['file'];
+		} else {
+			$file_path = '';
+		}
+
+		// allow overriding based on the particular file being requested
+		return apply_filters( 'woocommerce_product_file_download_path', $file_path, $this, $download_id );
 	}
 
 	/**
@@ -1499,15 +1172,6 @@ class WC_Product {
 		}
 
 		return  apply_filters( 'woocommerce_product_dimensions', $dimensions, $this );
-	}
-
-	/**
-	 * Lists a table of attributes for the product page.
-	 */
-	public function list_attributes() {
-		wc_get_template( 'single-product/product-attributes.php', array(
-			'product'    => $this
-		) );
 	}
 
 	/**
@@ -1551,21 +1215,6 @@ class WC_Product {
 	}
 
 	/**
-	 * Get product name with SKU or ID. Used within admin.
-	 *
-	 * @return string Formatted product name
-	 */
-	public function get_formatted_name() {
-		if ( $this->get_sku() ) {
-			$identifier = $this->get_sku();
-		} else {
-			$identifier = '#' . $this->id;
-		}
-
-		return sprintf( '%s &ndash; %s', $identifier, $this->get_title() );
-	}
-
-	/**
 	 * Retrieves related product terms.
 	 *
 	 * @param string $term
@@ -1580,6 +1229,702 @@ class WC_Product {
 		}
 
 		return array_map( 'absint', $terms_array );
+	}
+
+	/**
+	 * Get product name with SKU or ID.
+	 * Used within admin.
+	 *
+	 * @return string Formatted product name.
+	 */
+	public function get_formatted_name() {
+		$identifier = $this->get_sku() ? $this->get_sku() : '#' . $this->get_id();
+
+		return sprintf( '%s &ndash; %s', $identifier, $this->get_name() );
+	}
+
+	/**
+	 * Get product permalink.
+	 *
+	 * @return string
+	 */
+	public function get_permalink() {
+		return get_permalink( $this->get_id() );
+	}
+
+	/*
+	|--------------------------------------------------------------------------
+	| Setters
+	|--------------------------------------------------------------------------
+	|
+	| Functions for setting produt data. These should not update anything in the
+	| database itself and should only change what is stored in the class
+	| object. However, for backwards compatibility pre 2.7.0 some of these
+	| setters may handle both.
+	*/
+
+	/**
+	 * Set product ID.
+	 *
+	 * @since 2.7.0
+	 * @param int $id Product ID.
+	 */
+	public function set_id( $id ) {
+		$this->_data['id'] = absint( $id );
+	}
+
+	/**
+	 * Set product name.
+	 *
+	 * @since 2.7.0
+	 * @param int $name Product name.
+	 */
+	public function set_name( $name ) {
+		$this->_data['name'] = $name;
+	}
+
+	/**
+	 * Set product slug.
+	 *
+	 * @since 2.7.0
+	 * @param string $slug Product slug.
+	 */
+	public function set_slug( $slug ) {
+		$this->_data['slug'] = $slug;
+	}
+
+	/**
+	 * Set order status.
+	 *
+	 * @since 2.7.0
+	 * @param string $status
+	 */
+	public function set_status( $status ) {
+		$this->_data['status'] = $status;
+	}
+
+	/**
+	 * Set date created.
+	 *
+	 * @since 2.7.0
+	 * @param string $timestamp Timestamp
+	 */
+	public function set_date_created( $timestamp ) {
+		$this->_data['date_created'] = is_numeric( $timestamp ) ? $timestamp : strtotime( $timestamp );
+	}
+
+	/**
+	 * Set date modified.
+	 *
+	 * @since 2.7.0
+	 * @param string $timestamp Timestamp
+	 */
+	public function set_date_modified( $timestamp ) {
+		$this->_data['date_modified'] = is_numeric( $timestamp ) ? $timestamp : strtotime( $timestamp );
+	}
+
+	/**
+	 * Set description.
+	 *
+	 * @since 2.7.0
+	 * @param string $description
+	 */
+	public function set_description( $description ) {
+		$this->_data['description'] = $description;
+	}
+
+	/**
+	 * Set short description.
+	 *
+	 * @since 2.7.0
+	 * @param string $short_description
+	 */
+	public function set_short_description( $short_description ) {
+		$this->_data['short_description'] = $short_description;
+	}
+
+	/**
+	 * Set product author ID.
+	 *
+	 * @since 2.7.0
+	 * @param int $author_id
+	 */
+	public function set_author_id( $author_id ) {
+		$this->_data['author_id'] = $author_id;
+	}
+
+	/**
+	 * Set product parent ID.
+	 *
+	 * @since 2.7.0
+	 * @param int $parent_id
+	 */
+	public function set_parent_id( $parent_id ) {
+		$this->_data['parent_id'] = $parent_id;
+	}
+
+	/**
+	 * Set product menu order.
+	 *
+	 * @since 2.7.0
+	 * @param int $menu_order
+	 */
+	public function set_menu_order( $menu_order ) {
+		$this->_data['menu_order'] = $menu_order;
+	}
+
+	/**
+	 * Set stock level of the product.
+	 *
+	 * Uses queries rather than update_post_meta so we can do this in one query (to avoid stock issues).
+	 * We cannot rely on the original loaded value in case another order was made since then.
+	 *
+	 * @param int $amount (default: null)
+	 * @param string $mode can be set, add, or subtract
+	 * @return int new stock level
+	 */
+	public function set_stock( $amount = null, $mode = 'set' ) {
+		global $wpdb;
+
+		if ( ! is_null( $amount ) && $this->managing_stock() ) {
+
+			// Ensure key exists
+			add_post_meta( $this->id, '_stock', 0, true );
+
+			// Update stock in DB directly
+			switch ( $mode ) {
+				case 'add' :
+					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = meta_value + %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
+				break;
+				case 'subtract' :
+					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = meta_value - %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
+				break;
+				default :
+					$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->postmeta} SET meta_value = %f WHERE post_id = %d AND meta_key='_stock'", $amount, $this->id ) );
+				break;
+			}
+
+			// Clear caches
+			wp_cache_delete( $this->id, 'post_meta' );
+			delete_transient( 'wc_low_stock_count' );
+			delete_transient( 'wc_outofstock_count' );
+			unset( $this->stock );
+
+			// Stock status
+			$this->check_stock_status();
+
+			// Trigger action
+			do_action( 'woocommerce_product_set_stock', $this );
+		}
+
+		return $this->get_stock_quantity();
+	}
+
+	/**
+	 * Set stock status of the product.
+	 *
+	 * @param string $status
+	 */
+	public function set_stock_status( $status ) {
+
+		$status = ( 'outofstock' === $status ) ? 'outofstock' : 'instock';
+
+		// Sanity check
+		if ( $this->managing_stock() ) {
+			if ( ! $this->backorders_allowed() && $this->get_stock_quantity() <= get_option( 'woocommerce_notify_no_stock_amount' ) ) {
+				$status = 'outofstock';
+			}
+		}
+
+		if ( update_post_meta( $this->id, '_stock_status', $status ) ) {
+			$this->stock_status = $status;
+			do_action( 'woocommerce_product_set_stock_status', $this->id, $status );
+		}
+	}
+
+	/**
+	 * __isset function.
+	 *
+	 * @param mixed $key
+	 * @return bool
+	 */
+	public function __isset( $key ) {
+		return metadata_exists( 'post', $this->id, '_' . $key );
+	}
+
+	/**
+	 * __get function.
+	 *
+	 * @param string $key
+	 * @return mixed
+	 */
+	public function __get( $key ) {
+		$value = get_post_meta( $this->id, '_' . $key, true );
+
+		// Get values or default if not set
+		if ( in_array( $key, array( 'downloadable', 'virtual', 'backorders', 'manage_stock', 'featured', 'sold_individually' ) ) ) {
+			$value = $value ? $value : 'no';
+
+		} elseif ( in_array( $key, array( 'product_attributes', 'crosssell_ids', 'upsell_ids' ) ) ) {
+			$value = $value ? $value : array();
+
+		} elseif ( 'visibility' === $key ) {
+			$value = $value ? $value : 'hidden';
+
+		} elseif ( 'stock' === $key ) {
+			$value = $value ? $value : 0;
+
+		} elseif ( 'stock_status' === $key ) {
+			$value = $value ? $value : 'instock';
+
+		} elseif ( 'tax_status' === $key ) {
+			$value = $value ? $value : 'taxable';
+
+		}
+
+		if ( false !== $value ) {
+			$this->$key = $value;
+		}
+
+		return $value;
+	}
+
+	/**
+	 * Check if a product supports a given feature.
+	 *
+	 * Product classes should override this to declare support (or lack of support) for a feature.
+	 *
+	 * @param string $feature string The name of a feature to test support for.
+	 * @return bool True if the product supports the feature, false otherwise.
+	 * @since 2.5.0
+	 */
+	public function supports( $feature ) {
+		return apply_filters( 'woocommerce_product_supports', in_array( $feature, $this->supports ) ? true : false, $feature, $this );
+	}
+
+	/**
+	 * Check if the stock status needs changing.
+	 */
+	public function check_stock_status() {
+		if ( ! $this->backorders_allowed() && $this->get_total_stock() <= get_option( 'woocommerce_notify_no_stock_amount' ) ) {
+			if ( $this->stock_status !== 'outofstock' ) {
+				$this->set_stock_status( 'outofstock' );
+			}
+		} elseif ( $this->backorders_allowed() || $this->get_total_stock() > get_option( 'woocommerce_notify_no_stock_amount' ) ) {
+			if ( $this->stock_status !== 'instock' ) {
+				$this->set_stock_status( 'instock' );
+			}
+		}
+	}
+
+	/**
+	 * Reduce stock level of the product.
+	 *
+	 * @param int $amount Amount to reduce by. Default: 1
+	 * @return int new stock level
+	 */
+	public function reduce_stock( $amount = 1 ) {
+		return $this->set_stock( $amount, 'subtract' );
+	}
+
+	/**
+	 * Increase stock level of the product.
+	 *
+	 * @param int $amount Amount to increase by. Default 1.
+	 * @return int new stock level
+	 */
+	public function increase_stock( $amount = 1 ) {
+		return $this->set_stock( $amount, 'add' );
+	}
+
+	/**
+	 * Checks the product type.
+	 *
+	 * Backwards compat with downloadable/virtual.
+	 *
+	 * @param string $type Array or string of types
+	 * @return bool
+	 */
+	public function is_type( $type ) {
+		return ( $this->product_type == $type || ( is_array( $type ) && in_array( $this->product_type, $type ) ) ) ? true : false;
+	}
+
+	/**
+	 * Checks if a product is downloadable.
+	 *
+	 * @return bool
+	 */
+	public function is_downloadable() {
+		return $this->downloadable == 'yes' ? true : false;
+	}
+
+	/**
+	 * Check if downloadable product has a file attached.
+	 *
+	 * @since 1.6.2
+	 *
+	 * @param string $download_id file identifier
+	 * @return bool Whether downloadable product has a file attached.
+	 */
+	public function has_file( $download_id = '' ) {
+		return ( $this->is_downloadable() && $this->get_file( $download_id ) ) ? true : false;
+	}
+
+	/**
+	 * Checks if a product is virtual (has no shipping).
+	 *
+	 * @return bool
+	 */
+	public function is_virtual() {
+		return apply_filters( 'woocommerce_is_virtual', $this->virtual == 'yes' ? true : false, $this );
+	}
+
+	/**
+	 * Checks if a product needs shipping.
+	 *
+	 * @return bool
+	 */
+	public function needs_shipping() {
+		return apply_filters( 'woocommerce_product_needs_shipping', $this->is_virtual() ? false : true, $this );
+	}
+
+	/**
+	 * Check if a product is sold individually (no quantities).
+	 *
+	 * @return bool
+	 */
+	public function is_sold_individually() {
+
+		$return = false;
+
+		if ( 'yes' == $this->sold_individually ) {
+			$return = true;
+		}
+
+		return apply_filters( 'woocommerce_is_sold_individually', $return, $this );
+	}
+
+	/**
+	 * Returns whether or not the product has any child product.
+	 *
+	 * @return bool
+	 */
+	public function has_child() {
+		return false;
+	}
+
+	/**
+	 * Returns whether or not the product post exists.
+	 *
+	 * @return bool
+	 */
+	public function exists() {
+		return empty( $this->post ) ? false : true;
+	}
+
+	/**
+	 * Returns whether or not the product is taxable.
+	 *
+	 * @return bool
+	 */
+	public function is_taxable() {
+		$taxable = $this->get_tax_status() === 'taxable' && wc_tax_enabled() ? true : false;
+		return apply_filters( 'woocommerce_product_is_taxable', $taxable, $this );
+	}
+
+	/**
+	 * Returns whether or not the product shipping is taxable.
+	 *
+	 * @return bool
+	 */
+	public function is_shipping_taxable() {
+		return $this->get_tax_status() === 'taxable' || $this->get_tax_status() === 'shipping' ? true : false;
+	}
+
+	/**
+	 * Get the add to url used mainly in loops.
+	 *
+	 * @return string
+	 */
+	public function add_to_cart_url() {
+		return apply_filters( 'woocommerce_product_add_to_cart_url', get_permalink( $this->id ), $this );
+	}
+
+	/**
+	 * Get the add to cart button text for the single page.
+	 *
+	 * @return string
+	 */
+	public function single_add_to_cart_text() {
+		return apply_filters( 'woocommerce_product_single_add_to_cart_text', __( 'Add to cart', 'woocommerce' ), $this );
+	}
+
+	/**
+	 * Get the add to cart button text.
+	 *
+	 * @return string
+	 */
+	public function add_to_cart_text() {
+		return apply_filters( 'woocommerce_product_add_to_cart_text', __( 'Read more', 'woocommerce' ), $this );
+	}
+
+	/**
+	 * Returns whether or not the product is stock managed.
+	 *
+	 * @return bool
+	 */
+	public function managing_stock() {
+		return ( ! isset( $this->manage_stock ) || $this->manage_stock == 'no' || get_option( 'woocommerce_manage_stock' ) !== 'yes' ) ? false : true;
+	}
+
+	/**
+	 * Returns whether or not the product is in stock.
+	 *
+	 * @return bool
+	 */
+	public function is_in_stock() {
+		return apply_filters( 'woocommerce_product_is_in_stock', $this->stock_status === 'instock', $this );
+	}
+
+	/**
+	 * Returns whether or not the product can be backordered.
+	 *
+	 * @return bool
+	 */
+	public function backorders_allowed() {
+		return apply_filters( 'woocommerce_product_backorders_allowed', $this->backorders === 'yes' || $this->backorders === 'notify' ? true : false, $this->id, $this );
+	}
+
+	/**
+	 * Returns whether or not the product needs to notify the customer on backorder.
+	 *
+	 * @return bool
+	 */
+	public function backorders_require_notification() {
+		return apply_filters( 'woocommerce_product_backorders_require_notification', $this->managing_stock() && $this->backorders === 'notify' ? true : false, $this );
+	}
+
+	/**
+	 * Check if a product is on backorder.
+	 *
+	 * @param int $qty_in_cart (default: 0)
+	 * @return bool
+	 */
+	public function is_on_backorder( $qty_in_cart = 0 ) {
+		return $this->managing_stock() && $this->backorders_allowed() && ( $this->get_total_stock() - $qty_in_cart ) < 0 ? true : false;
+	}
+
+	/**
+	 * Returns whether or not the product has enough stock for the order.
+	 *
+	 * @param mixed $quantity
+	 * @return bool
+	 */
+	public function has_enough_stock( $quantity ) {
+		return ! $this->managing_stock() || $this->backorders_allowed() || $this->get_stock_quantity() >= $quantity ? true : false;
+	}
+
+	/**
+	 * Returns whether or not the product is featured.
+	 *
+	 * @return bool
+	 */
+	public function is_featured() {
+		return $this->featured === 'yes' ? true : false;
+	}
+
+	/**
+	 * Returns whether or not the product is visible in the catalog.
+	 *
+	 * @return bool
+	 */
+	public function is_visible() {
+		if ( ! $this->post ) {
+			$visible = false;
+
+		// Published/private.
+		} elseif ( $this->post->post_status !== 'publish' && ! current_user_can( 'edit_post', $this->id ) ) {
+			$visible = false;
+
+		// Out of stock visibility.
+		} elseif ( 'yes' === get_option( 'woocommerce_hide_out_of_stock_items' ) && ! $this->is_in_stock() ) {
+			$visible = false;
+
+		// visibility setting.
+		} elseif ( 'hidden' === $this->visibility ) {
+			$visible = false;
+		} elseif ( 'visible' === $this->visibility ) {
+			$visible = true;
+
+		// Visibility in loop.
+		} elseif ( is_search() ) {
+			$visible = 'search' === $this->visibility;
+		} else {
+			$visible = 'catalog' === $this->visibility;
+		}
+
+		return apply_filters( 'woocommerce_product_is_visible', $visible, $this->id );
+	}
+
+	/**
+	 * Returns whether or not the product is on sale.
+	 *
+	 * @return bool
+	 */
+	public function is_on_sale() {
+		return apply_filters( 'woocommerce_product_is_on_sale', ( $this->get_sale_price() !== $this->get_regular_price() && $this->get_sale_price() === $this->get_price() ), $this );
+	}
+
+	/**
+	 * Returns false if the product cannot be bought.
+	 *
+	 * @return bool
+	 */
+	public function is_purchasable() {
+		$purchasable = true;
+
+		// Products must exist of course.
+		if ( ! $this->exists() ) {
+			$purchasable = false;
+
+		// Other products types need a price to be set.
+		} elseif ( $this->get_price() === '' ) {
+			$purchasable = false;
+
+		// Check the product is published.
+		} elseif ( $this->post->post_status !== 'publish' && ! current_user_can( 'edit_post', $this->id ) ) {
+			$purchasable = false;
+		}
+
+		return apply_filters( 'woocommerce_is_purchasable', $purchasable, $this );
+	}
+
+	/**
+	 * Set a products price dynamically.
+	 *
+	 * @param float $price Price to set.
+	 */
+	public function set_price( $price ) {
+		$this->price = $price;
+	}
+
+	/**
+	 * Adjust a products price dynamically.
+	 *
+	 * @param float $price
+	 */
+	public function adjust_price( $price ) {
+		$this->price = $this->price + $price;
+	}
+
+	/**
+	 * Sync product rating.
+	 * Can be called statically.
+	 *
+	 * @param int $post_id
+	 */
+	public static function sync_average_rating( $post_id ) {
+		if ( ! metadata_exists( 'post', $post_id, '_wc_rating_count' ) ) {
+			self::sync_rating_count( $post_id );
+		}
+
+		$count = array_sum( (array) get_post_meta( $post_id, '_wc_rating_count', true ) );
+
+		if ( $count ) {
+			global $wpdb;
+
+			$ratings = $wpdb->get_var( $wpdb->prepare("
+				SELECT SUM(meta_value) FROM $wpdb->commentmeta
+				LEFT JOIN $wpdb->comments ON $wpdb->commentmeta.comment_id = $wpdb->comments.comment_ID
+				WHERE meta_key = 'rating'
+				AND comment_post_ID = %d
+				AND comment_approved = '1'
+				AND meta_value > 0
+			", $post_id ) );
+			$average = number_format( $ratings / $count, 2, '.', '' );
+		} else {
+			$average = 0;
+		}
+
+		update_post_meta( $post_id, '_wc_average_rating', $average );
+	}
+
+	/**
+	 * Sync product rating count. Can be called statically.
+	 * @param  int $post_id
+	 */
+	public static function sync_rating_count( $post_id ) {
+		global $wpdb;
+
+		$counts     = array();
+		$raw_counts = $wpdb->get_results( $wpdb->prepare( "
+			SELECT meta_value, COUNT( * ) as meta_value_count FROM $wpdb->commentmeta
+			LEFT JOIN $wpdb->comments ON $wpdb->commentmeta.comment_id = $wpdb->comments.comment_ID
+			WHERE meta_key = 'rating'
+			AND comment_post_ID = %d
+			AND comment_approved = '1'
+			AND meta_value > 0
+			GROUP BY meta_value
+		", $post_id ) );
+
+		foreach ( $raw_counts as $count ) {
+			$counts[ $count->meta_value ] = $count->meta_value_count;
+		}
+
+		update_post_meta( $post_id, '_wc_rating_count', $counts );
+	}
+
+	/**
+	 * Returns whether or not the product has any attributes set.
+	 *
+	 * @return bool
+	 */
+	public function has_attributes() {
+		if ( sizeof( $this->get_attributes() ) > 0 ) {
+			foreach ( $this->get_attributes() as $attribute ) {
+				if ( isset( $attribute['is_visible'] ) && $attribute['is_visible'] ) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Returns whether or not we are showing dimensions on the product page.
+	 *
+	 * @return bool
+	 */
+	public function enable_dimensions_display() {
+		return apply_filters( 'wc_product_enable_dimensions_display', true );
+	}
+
+	/**
+	 * Returns whether or not the product has dimensions set.
+	 *
+	 * @return bool
+	 */
+	public function has_dimensions() {
+		return $this->get_dimensions() ? true : false;
+	}
+
+	/**
+	 * Returns whether or not the product has weight set.
+	 *
+	 * @return bool
+	 */
+	public function has_weight() {
+		return $this->get_weight() ? true : false;
+	}
+
+	/**
+	 * Lists a table of attributes for the product page.
+	 */
+	public function list_attributes() {
+		wc_get_template( 'single-product/product-attributes.php', array(
+			'product'    => $this
+		) );
 	}
 
 	/**
